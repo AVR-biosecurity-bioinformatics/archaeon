@@ -47,6 +47,18 @@ When applied to a new genome, Archaeon:
 5. Generates genome-specific annotation tracks.
 This creates a stable and reproducible framework for transferring mutation knowledge across taxa.
 
+# Supported resistance mutations and archetypes
+The initial `archaeon` release will focus on a small set of well-characterised target-site resistance genes with established mutation nomenclature and clear orthology relationships. For these, we have aimed to select archetype sequences around which the field has already converged:
+
+| Gene | Archetype Species | Archetype Protein | Rationale |
+|--------|---------------------|-------------------|-----------|
+| RyR | *Plutella xylostella* | Ryanodine receptor (RyR) | Canonical reference for diamide resistance mutations, including well-established coordinates such as G4946E and I4790M. |
+| VGSC (*para*) | *Musca domestica* | Voltage-gated sodium channel (para) | Widely used kdr coordinate system for pyrethroid and DDT resistance (e.g. L1014F, M918T). |
+| Ace1 | *Anopheles gambiae* | Acetylcholinesterase-1 (Ace-1) | Established coordinate system for organophosphate and carbamate resistance mutations such as G119S. |
+| nAChR α6 | *Frankliniella occidentalis* | Nicotinic acetylcholine receptor α6 subunit | G275E has become the predominant coordinate system used across the spinosyn resistance literature and surveillance programs. |
+| Rdl | *Drosophila melanogaster* | Resistance to dieldrin (Rdl) GABA receptor | Canonical coordinate system for cyclodiene and fipronil resistance mutations such as A301S and A301G. |
+
+
 # Relationship to Existing Tools
 `archaeon` is conceptually similar to [FRAST](https://www.frast.com.au/) in that it uses curated archetype proteins as a common coordinate framework and projects literature-derived mutations through sequence alignments. FRAST aligns protein sequences to curated archetypes and reports mutations relative to standardised archetype coordinates, helping resolve inconsistencies in species-specific residue numbering. 
 
