@@ -1,0 +1,910 @@
+---
+title: "Untitled"
+format: html
+---
+
+
+# Archaeon draft
+
+This bash code now works for projecting multiple mutations
+
+Could be optimised a bit for simplicity
+
+```{bash}
+ml DIAMOND/2.1.11-GCC-13.3.0
+ml BEDTools/2.31.1-GCC-13.3.0
+ml MAFFT/7.526-GCC-13.3.0-with-extensions
+
+PROT=/group/referencedata/mspd-db/genomes/insect/bactrocera_dorsalis/GWHFHGK00000000.1/GWHFHGK00000000.1.Protein.faa
+ARCHETYPES=archetypes.faa
+GFF=/group/referencedata/mspd-db/genomes/insect/bactrocera_dorsalis/GWHFHGK00000000.1/GWHFHGK00000000.1.gff
+FA=/group/referencedata/mspd-db/genomes/insect/bactrocera_dorsalis/GWHFHGK00000000.1/GWHFHGK00000000.1.genome.fasta
+
+GENE=nAChR_alpha6
+
+THREADS=16
+OUTDIR=test
+
+mkdir -p "$OUTDIR"
+
+# Build diamond DB of proteome
+diamond makedb \
+--in "$PROT" \
+--db "$OUTDIR/target_proteome"
+
+# Search all archetypes against reference proteome
+diamond blastp \
+    --query "$ARCHETYPES" \
+    --db "$OUTDIR/target_proteome" \
+    --out "$OUTDIR/archetypes_vs_proteome.tsv" \
+    --outfmt 6 \
+        qseqid \
+        sseqid \
+        pident \
+        length \
+        qlen \
+        slen \
+        qstart \
+        qend \
+        sstart \
+        send \
+        evalue \
+        bitscore \
+        qcovhsp \
+        scovhsp \
+        qtitle \
+        stitle \
+    --evalue 1e-10 \
+    --max-target-seqs 20 \
+    --more-sensitive \
+    --threads "$THREADS"
+
+# Rank hits within each archetype
+{
+    printf '%s\n' \
+        $'archetype_id\ttarget_protein_id\tpident\talignment_length\tarchetype_length\ttarget_length\tqstart\tqend\tsstart\tsend\tevalue\tbitscore\tarchetype_coverage\ttarget_coverage\trank'
+
+    sort \
+        -t $'\t' \
+        -k1,1 \
+        -k12,12gr \
+        "$OUTDIR/archetypes_vs_proteome.tsv" |
+    awk -F'\t' '
+    BEGIN {
+        OFS="\t"
+    }
+
+    {
+        if ($1 != previous_archetype) {
+            rank=1
+            previous_archetype=$1
+        }
+        else {
+            rank++
+        }
+
+        print $1, $2, $3, $4, $5, $6,
+              $7, $8, $9, $10, $11, $12,
+              $13, $14, rank
+    }
+    '
+} > "$OUTDIR/orthologue_candidates.tsv"
+
+# Generate provisional orthologues - TODO: Need to come up with good filtering scheme
+awk -F'\t' '
+BEGIN {
+    OFS="\t"
+}
+
+NR == 1 {
+    print
+    next
+}
+
+$13 >= 70 && $14 >= 70 && $15 == 1 {
+    print
+}
+' "$OUTDIR/orthologue_candidates.tsv" \
+> "$OUTDIR/provisional_orthologues.tsv"
+
+mkdir -p "$OUTDIR/coord_maps"
+mkdir -p "$OUTDIR/alignments"
+mkdir -p "$OUTDIR/work"
+
+# Extract record helper
+extract_record() {
+
+    local FASTA=$1
+    local ID=$2
+
+    awk -v target="$ID" '
+
+    /^>/ {
+
+        id=$1
+        sub(/^>/,"",id)
+
+        keep=(id==target)
+    }
+
+    keep
+
+    ' "$FASTA"
+}
+
+# Loop through all provisional orthologs, buildign coordinate map to archetype
+tail -n +2 "$OUTDIR/provisional_orthologues.tsv" |
+while IFS=$'\t' read \
+    GENE \
+    TARGET_PROT \
+    PIDENT \
+    ALIGN_LEN \
+    ARCH_LEN \
+    TARGET_LEN \
+    QSTART \
+    QEND \
+    SSTART \
+    SEND \
+    EVALUE \
+    BITSCORE \
+    QCOV \
+    SCOV \
+    RANK
+do
+
+    echo "Processing $GENE -> $TARGET_PROT"
+
+    WORK="$OUTDIR/work/$GENE"
+
+    mkdir -p "$WORK"
+
+    # Extract archetype
+    extract_record \
+        "$ARCHETYPES" \
+        "$GENE" \
+    > "$WORK/archetype.faa"
+
+    # Extract target protein
+    extract_record \
+        "$PROT" \
+        "$TARGET_PROT" \
+    > "$WORK/target.faa"
+
+    # Rename sequences for alignment
+    awk '
+    BEGIN{seq=""}
+    /^>/ {next}
+    {seq=seq$0}
+    END{
+        print ">archetype"
+        print seq
+    }' "$WORK/archetype.faa" \
+    > "$WORK/archetype.clean.faa"
+
+    awk '
+    BEGIN{seq=""}
+    /^>/ {next}
+    {seq=seq$0}
+    END{
+        print ">target"
+        print seq
+    }' "$WORK/target.faa" \
+    > "$WORK/target.clean.faa"
+
+    cat \
+        "$WORK/archetype.clean.faa" \
+        "$WORK/target.clean.faa" \
+    > "$WORK/pair.faa"
+
+    mafft \
+        --quiet \
+        --auto \
+        "$WORK/pair.faa" \
+    > "$OUTDIR/alignments/${GENE}.aln.faa"
+
+    # Build coordinate map
+    awk -v gene="$GENE" '
+
+    BEGIN {
+        active=""
+    }
+
+    /^>/ {
+
+        id=$1
+        sub(/^>/,"",id)
+
+        if(id=="archetype")
+            active="arch"
+        else if(id=="target")
+            active="target"
+
+        next
+    }
+
+    active=="arch" {
+        arch=arch $0
+    }
+
+    active=="target" {
+        target=target $0
+    }
+
+    END {
+
+        arch_pos=0
+        target_pos=0
+
+        print "gene_id\tarch_pos\ttarget_pos\tarch_aa\ttarget_aa"
+
+        for(i=1;i<=length(arch);i++) {
+
+            a=substr(arch,i,1)
+            t=substr(target,i,1)
+
+            if(a!="-")
+                arch_pos++
+
+            if(t!="-")
+                target_pos++
+
+            if(a!="-") {
+
+                tp=(t=="-" ? "." : target_pos)
+
+                print gene "\t" \
+                      arch_pos "\t" \
+                      tp "\t" \
+                      a "\t" \
+                      t
+            }
+        }
+    }
+    ' "$OUTDIR/alignments/${GENE}.aln.faa" \
+    > "$OUTDIR/coord_maps/${GENE}.tsv"
+
+done
+
+# Build master coordinate map containing all genes
+{
+    FIRST=1
+
+    for FILE in "$OUTDIR"/coord_maps/*.tsv
+    do
+
+        if [[ $FIRST -eq 1 ]]
+        then
+            cat "$FILE"
+            FIRST=0
+        else
+            tail -n +2 "$FILE"
+        fi
+
+    done
+
+} > "$OUTDIR/all_coord_maps.tsv"
+
+
+# Project Multiple mutations from mutations.tsv
+dos2unix mutations.tsv
+
+awk '
+BEGIN {
+    FS=OFS="\t"
+}
+
+############################################################
+# Load master coord map
+############################################################
+
+NR==FNR {
+
+    if(FNR > 1) {
+
+        key = $1 ":" $2
+
+        target_pos[key] = $3
+        arch_aa[key]    = $4
+        target_ref[key] = $5
+    }
+
+    next
+}
+
+############################################################
+# Header
+############################################################
+
+FNR==1 {
+
+    print $0,
+          "target_pos",
+          "target_ref",
+          "target_mutation",
+          "projection_status"
+
+    next
+}
+
+############################################################
+# Mutations
+############################################################
+
+{
+
+    gene_id      = $1
+    archetype_id = $2
+    ref_aa       = $3
+    pos          = $4
+    alt_aa       = $5
+
+    key = gene_id ":" pos
+
+    tp = target_pos[key]
+    ar = arch_aa[key]
+    tr = target_ref[key]
+
+    if(pos == "" || pos == "NA") {
+
+        projected="NA"
+        status="missing_archetype_position"
+
+    }
+    else if(tp == "" && tr == "") {
+
+        projected="NA"
+        status="position_not_in_coord_map"
+
+    }
+    else if(tp == ".") {
+
+        projected="NA"
+        status="target_gap"
+
+    }
+    else if(ref_aa != "" &&
+            ar != "" &&
+            ref_aa != ar) {
+
+        projected = tr tp alt_aa
+        status="archetype_ref_mismatch"
+
+    }
+    else if(ref_aa != "" &&
+            tr != ref_aa) {
+
+        projected = tr tp alt_aa
+        status="different_target_reference"
+
+    }
+    else {
+
+        projected = tr tp alt_aa
+        status="same_reference_residue"
+    }
+
+    print $0,
+          tp,
+          tr,
+          projected,
+          status
+}
+' \
+"$OUTDIR/all_coord_maps.tsv" \
+mutations.tsv \
+> "$OUTDIR/projected_mutations.tsv"
+
+# Add target protein from proteome
+awk '
+BEGIN {
+    FS=OFS="\t"
+}
+
+NR==FNR {
+
+    if(FNR==1)
+        next
+
+    target_protein[$1]=$2
+
+    next
+}
+
+FNR==1 {
+
+    print $0,"target_protein"
+    next
+}
+
+{
+    print $0,target_protein[$1]
+}
+' \
+"$OUTDIR/provisional_orthologues.tsv" \
+"$OUTDIR/projected_mutations.tsv" \
+> "$OUTDIR/projected_mutations_with_proteins.tsv"
+
+# Build CDS lookup once
+awk -F'\t' '
+BEGIN {
+    OFS="\t"
+}
+
+$3=="CDS" {
+
+    acc=$9
+
+    sub(/^.*Protein_Accession=/,"",acc)
+    sub(/;.*/,"",acc)
+
+    print acc,$1,$4,$5,$7
+}
+' "$GFF" \
+> "$OUTDIR/cds_lookup.tsv"
+
+# Generate genomic features
+printf '%s\n' \
+'gene_id	archetype_id	source_mutation	target_mutation	target_protein	target_pos' \
+> "$OUTDIR/genomic_features.tsv"
+
+awk '
+BEGIN {
+    FS=OFS="\t"
+}
+
+FNR==1 {
+    next
+}
+
+$14=="same_reference_residue" {
+
+    print \
+        $1, \
+        $2, \
+        $7, \
+        $13, \
+        $15, \
+        $11
+}
+' \
+"$OUTDIR/projected_mutations_with_proteins.tsv" \
+>> "$OUTDIR/genomic_features.tsv"
+
+# Collaps duplicate features (should be done earlier)
+awk '
+BEGIN {
+    FS=OFS="\t"
+}
+
+NR==1 {
+    next
+}
+
+{
+    key=$1 OFS $2 OFS $4 OFS $5 OFS $6
+
+    if(!(key in seen)) {
+
+        seen[key]=1
+
+        print
+    }
+}
+' "$OUTDIR/genomic_features.tsv" \
+> "$OUTDIR/canonical_genomic_features.tsv"
+
+# Generate coordinates
+printf '%s\n' \
+'gene_id	archetype_id	source_mutation	target_mutation	target_protein	target_pos	chr	start	end	strand' \
+> "$OUTDIR/genomic_coordinates.tsv"
+
+tail -n +1 "$OUTDIR/canonical_genomic_features.tsv" |
+while IFS=$'\t' read \
+    GENE_ID \
+    ARCHETYPE_ID \
+    SOURCE_MUTATION \
+    TARGET_MUTATION \
+    TARGET_PROTEIN \
+    TARGET_POS
+do
+
+    CODON_START=$(( (TARGET_POS - 1) * 3 + 1 ))
+    CODON_END=$(( CODON_START + 2 ))
+
+    awk \
+        -F'\t' \
+        -v protein="$TARGET_PROTEIN" '
+    BEGIN {
+        OFS="\t"
+    }
+
+    $3=="CDS" {
+
+        attr=$9
+
+        sub(/^.*Protein_Accession=/,"",attr)
+        sub(/;.*/,"",attr)
+
+        if(attr==protein)
+            print $1,$4,$5,$7
+    }
+    ' "$GFF" \
+    > cds.tmp
+
+    [[ ! -s cds.tmp ]] && continue
+
+    STRAND=$(awk 'NR==1{print $4}' cds.tmp)
+
+    if [[ "$STRAND" == "+" ]]
+    then
+        sort -k2,2n cds.tmp > cds.sorted.tmp
+    else
+        sort -k2,2nr cds.tmp > cds.sorted.tmp
+    fi
+
+    awk \
+        -v first="$CODON_START" \
+        -v last="$CODON_END" '
+    BEGIN {
+        cds=0
+    }
+
+    {
+        chr=$1
+        start=$2
+        end=$3
+        strand=$4
+
+        if(strand=="+") {
+
+            for(i=start;i<=end;i++) {
+
+                cds++
+
+                if(cds>=first && cds<=last)
+                    print chr"\t"i"\t"strand
+            }
+
+        } else {
+
+            for(i=end;i>=start;i--) {
+
+                cds++
+
+                if(cds>=first && cds<=last)
+                    print chr"\t"i"\t"strand
+            }
+        }
+    }
+    ' cds.sorted.tmp \
+    > codon.tmp
+
+    [[ ! -s codon.tmp ]] && continue
+
+    read CHR START END <<< $(
+        awk '
+        NR==1 {
+            chr=$1
+            min=$2
+            max=$2
+        }
+
+        {
+            if($2<min) min=$2
+            if($2>max) max=$2
+            strand=$3
+        }
+
+        END {
+            print chr,min,max,strand
+        }
+        ' codon.tmp
+    )
+
+    STRAND_FINAL=$(awk 'END{print $3}' codon.tmp)
+
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$GENE_ID" \
+        "$ARCHETYPE_ID" \
+        "$SOURCE_MUTATION" \
+        "$TARGET_MUTATION" \
+        "$TARGET_PROTEIN" \
+        "$TARGET_POS" \
+        "$CHR" \
+        "$START" \
+        "$END" \
+        "$STRAND_FINAL" \
+    >> "$OUTDIR/genomic_coordinates.tsv"
+
+done
+
+# Generate gff
+{
+    echo "##gff-version 3"
+
+    awk '
+    BEGIN {
+        FS=OFS="\t"
+    }
+
+    NR==1 {
+        next
+    }
+
+    {
+        attrs = "ID=" $1 "_" $4 \
+                ";Gene=" $1 \
+                ";Archetype=" $2 \
+                ";SourceMutation=" $3 \
+                ";ProjectedMutation=" $4 \
+                ";Protein=" $5 \
+                ";TargetPosition=" $6
+
+        print \
+            $7, \
+            "Archaeon", \
+            "resistance_mutation", \
+            $8, \
+            $9, \
+            ".", \
+            $10, \
+            ".", \
+            attrs
+    }
+    ' "$OUTDIR/genomic_coordinates.tsv"
+
+} > "$OUTDIR/archaeon.gff3"
+
+```
+
+
+# Annotate VCF
+```bash
+
+VCF=/group/pathogens/IAWS/Projects/Tephritid/treaty_village/bcftools_calls.norm.csq.vcf.gz
+
+# Create per-position Archaeon annotation table for bcftools annotate
+awk '
+BEGIN {
+    FS=OFS="\t"
+}
+
+function get_attr(attr, key,    n, a, i, kv) {
+    n = split(attr, a, ";")
+    for(i=1; i<=n; i++) {
+        split(a[i], kv, "=")
+        if(kv[1] == key)
+            return kv[2]
+    }
+    return "."
+}
+
+$0 !~ /^#/ && $3 == "resistance_mutation" {
+    id        = get_attr($9, "ID")
+    gene      = get_attr($9, "Gene")
+    archetype = get_attr($9, "Archetype")
+    source    = get_attr($9, "SourceMutation")
+    projected = get_attr($9, "ProjectedMutation")
+    protein   = get_attr($9, "Protein")
+    aa_pos    = get_attr($9, "TargetPosition")
+
+    for(pos=$4; pos<=$5; pos++) {
+        print $1, pos, id, gene, archetype, source, projected, protein, aa_pos
+    }
+}
+' "$OUTDIR/archaeon.gff3" |
+sort -k1,1 -k2,2n |
+awk '
+BEGIN {
+    FS=OFS="\t"
+}
+
+function add_unique(existing, value,    n, a, i) {
+    if(value == "" || value == ".")
+        return existing
+
+    if(existing == "" || existing == ".")
+        return value
+
+    n = split(existing, a, ",")
+    for(i=1; i<=n; i++) {
+        if(a[i] == value)
+            return existing
+    }
+
+    return existing "," value
+}
+
+{
+    key = $1 OFS $2
+
+    if(key != previous && NR > 1) {
+        print chrom, pos, ids, genes, archetypes, sources, projected, proteins, aa_positions
+        ids=genes=archetypes=sources=projected=proteins=aa_positions=""
+    }
+
+    chrom = $1
+    pos   = $2
+
+    ids          = add_unique(ids,          $3)
+    genes        = add_unique(genes,        $4)
+    archetypes   = add_unique(archetypes,   $5)
+    sources      = add_unique(sources,      $6)
+    projected    = add_unique(projected,    $7)
+    proteins     = add_unique(proteins,     $8)
+    aa_positions = add_unique(aa_positions, $9)
+
+    previous = key
+}
+
+END {
+    if(NR > 0)
+        print chrom, pos, ids, genes, archetypes, sources, projected, proteins, aa_positions
+}
+' > "$OUTDIR/archaeon.vcf_annotations.tsv"
+
+# Make header
+cat > "$OUTDIR/archaeon.vcf_annotations.hdr" <<'EOF'
+##INFO=<ID=ARCHAEON_ID,Number=.,Type=String,Description="Archaeon resistance mutation feature ID overlapping this variant position">
+##INFO=<ID=ARCHAEON_GENE,Number=.,Type=String,Description="Archaeon resistance gene overlapping this variant position">
+##INFO=<ID=ARCHAEON_ARCHETYPE,Number=.,Type=String,Description="Archaeon archetype sequence used for resistance mutation projection">
+##INFO=<ID=ARCHAEON_SOURCE_MUTATION,Number=.,Type=String,Description="Source resistance mutation in archetype coordinates">
+##INFO=<ID=ARCHAEON_PROJECTED_MUTATION,Number=.,Type=String,Description="Projected resistance mutation in target protein coordinates">
+##INFO=<ID=ARCHAEON_PROTEIN,Number=.,Type=String,Description="Reference protein accession associated with the projected mutation">
+##INFO=<ID=ARCHAEON_AA_POS,Number=.,Type=String,Description="Target protein amino acid position associated with the projected mutation">
+EOF
+# Compress and index
+bgzip -f "$OUTDIR/archaeon.vcf_annotations.tsv"
+tabix -s 1 -b 2 -e 2 -f "$OUTDIR/archaeon.vcf_annotations.tsv.gz"
+
+# annotate
+bcftools annotate \
+    -a "$OUTDIR/archaeon.vcf_annotations.tsv.gz" \
+    -h "$OUTDIR/archaeon.vcf_annotations.hdr" \
+    -c CHROM,POS,INFO/ARCHAEON_ID,INFO/ARCHAEON_GENE,INFO/ARCHAEON_ARCHETYPE,INFO/ARCHAEON_SOURCE_MUTATION,INFO/ARCHAEON_PROJECTED_MUTATION,INFO/ARCHAEON_PROTEIN,INFO/ARCHAEON_AA_POS \
+    "$VCF" \
+    -Oz \
+    -o "$OUTDIR/archaeon.annotated.vcf.gz"
+
+bcftools index -f "$OUTDIR/archaeon.annotated.vcf.gz"
+```
+
+
+
+# Archaeon.py implementation
+
+```
+ml Python/3.12.3-GCCcore-13.3.0
+CSQ_VCF=/group/pathogens/IAWS/Projects/Tephritid/treaty_village/bcftools_calls.norm.csq.vcf.gz
+
+PROT=/group/referencedata/mspd-db/genomes/insect/bactrocera_dorsalis/GWHFHGK00000000.1/GWHFHGK00000000.1.Protein.faa
+ARCHETYPES=archetypes.faa
+GFF=/group/referencedata/mspd-db/genomes/insect/bactrocera_dorsalis/GWHFHGK00000000.1/GWHFHGK00000000.1.gff
+FA=/group/referencedata/mspd-db/genomes/insect/bactrocera_dorsalis/GWHFHGK00000000.1/GWHFHGK00000000.1.genome.fasta
+
+# Generate a table for archaeon input
+bcftools +split-vep $CSQ_VCF \
+    -a BCSQ \
+    -d \
+    -HH \
+    -f '%CHROM\t%POS\t%REF\t%ALT\t%Consequence\t%gene\t%transcript\t%amino_acid_change\t%dna_change\n' \
+    > consequences.tsv
+
+
+ml DIAMOND/2.1.11-GCC-13.3.0
+ml MAFFT/7.526-GCC-13.3.0-with-extensions
+python3 archaeon.py \
+    --consequences consequences.tsv \
+    --mutations mutations.utf8.tsv \
+    --archetypes archetypes.faa \
+    --proteome "$PROT" \
+    --gff "$GFF" \
+    --out-prefix results/archaeon \
+    --threads 16 \
+    --annotate-unmatched-protein-variants
+
+# Add archaeon outputs to the vcf
+LC_ALL=C sort \
+    -t $'\t' \
+    -k1,1 \
+    -k2,2n \
+    -k3,3 \
+    -k4,4 \
+    results/archaeon.matches.tsv \
+| bgzip -c \
+> results/archaeon.matches.tsv.gz
+
+tabix -f -s 1 -b 2 -e 2 results/archaeon.matches.tsv.gz
+
+bcftools annotate \
+    -a results/archaeon.matches.tsv.gz \
+    -h results/archaeon.hdr \
+    -c CHROM,POS,REF,ALT,INFO/ARCHAEON_RESULT,INFO/ARCHAEON_OBSERVED_MUTATION,INFO/ARCHAEON_MATCH,INFO/ARCHAEON_GENE,INFO/ARCHAEON_SOURCE_MUTATION,INFO/ARCHAEON_PROTEIN,INFO/ARCHAEON_STATUS \
+    $CSQ_VCF \
+    -Oz \
+    -o archaeon.annotated.vcf.gz
+
+bcftools index -f results/archaeon.annotated.vcf.gz
+
+```
+
+
+# CLI
+```
+ml Python/3.12.3-GCCcore-13.3.0
+ml DIAMOND/2.1.11-GCC-13.3.0
+ml MAFFT/7.526-GCC-13.3.0-with-extensions
+ml BCFtools/1.23.1-GCC-13.3.0
+CSQ_VCF=/group/pathogens/IAWS/Projects/Tephritid/treaty_village/bcftools_calls.norm.csq.vcf.gz
+
+PROT=/group/referencedata/mspd-db/genomes/insect/bactrocera_dorsalis/GWHFHGK00000000.1/GWHFHGK00000000.1.Protein.faa
+ARCHETYPES=archetypes.faa
+GFF=/group/referencedata/mspd-db/genomes/insect/bactrocera_dorsalis/GWHFHGK00000000.1/GWHFHGK00000000.1.gff
+REF=/group/referencedata/mspd-db/genomes/insect/bactrocera_dorsalis/GWHFHGK00000000.1/GWHFHGK00000000.1.genome.fasta
+
+GFF_FIXED=/group/pathogens/IAWS/Projects/Tephritid/treaty_village/agat.fixed.gff3
+
+# Create conda environment
+ml Miniconda3/24.7.1-0
+conda env create -f environment.yml
+source "$(conda info --base)/etc/profile.d/conda.sh"
+conda activate archaeon
+
+chmod +x archaeon.py
+
+./archaeon.py --help
+./archaeon.py build --help
+./archaeon.py annotate --help
+
+#Build a target-specific Archaeon database
+./archaeon.py build \
+    --reference "$REF" \
+    --gff "$GFF" \
+    --proteome "$PROT" \
+    --archetypes archetypes.faa \
+    --mutations mutations.utf8.tsv \
+    --output-dir databases/bactrocera_dorsalis \
+    --padding 50 \
+    --threads 16
+
+
+# Get list of crams
+find /group/pathogens/IAWS/Projects/Tephritid/treaty_village/output/results/cram -name '*cram' | grep "\\.cram$"   > cram.list
+
+# Use the generated bed for calling
+DB=databases/bactrocera_dorsalis
+ulimit -n 8192
+bcftools mpileup -Ou \
+  --threads 8 \
+  -f "$REF" \
+  --bam-list cram.list \
+  -R "$DB/calling_regions.bed" \
+  -Q 20 -q 30 \
+| bcftools call \
+  --threads 8 \
+  --ploidy 2 \
+  -mv \
+  -Ou \
+| bcftools norm \
+  -Ou \
+  -m -any \
+  -f "$REF" \
+| bcftools +fill-tags \
+  -Ou \
+  -- -t 'AC,AN,NS,MAF,F_MISSING,HWE,ExcHet,TYPE,CR:1=1-F_MISSING' \
+| bcftools csq \
+  -Ou \
+  -f "$REF" \
+  -g "$GFF_FIXED" \
+  --local-csq \
+| ./archaeon.py annotate \
+    --database "$DB" \
+    --out-prefix results/archaeon \
+    --annotate-unmatched \
+    --threads 8 \
+    -Oz \
+    -o results/variants.archaeon.vcf.gz
+
+bcftools index -f results/variants.archaeon.vcf.gz
+
+```
