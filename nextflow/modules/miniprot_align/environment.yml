@@ -1,0 +1,10 @@
+# environment.yml
+
+channels:
+  - conda-forge
+  - bioconda
+  - nodefaults
+
+dependencies:
+  - conda-forge::gawk
+  - bioconda::miniprot=0.18

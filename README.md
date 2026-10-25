@@ -1,7 +1,8 @@
 # archaeon
 `archaeon` projects curated reference mutations from archetype proteins onto annotated genomes and generates genome-specific annotation tracks for downstream variant analysis.
 
-This pipeline is currently **IN EARLY DEVELOPMENT** and is not yet publicly usable.
+> [!WARNING]
+> This pipeline is **experimental** and in early development. The code, configuration and outputs may change without notice, and there is no guarantee that the current version is stable or suitable for production analyses.
 
 # Scope
 `archaeon` is a bioinformatics framework for projecting curated reference mutations (such as insecticide mutations) from archetype proteins onto annotated genomes.
