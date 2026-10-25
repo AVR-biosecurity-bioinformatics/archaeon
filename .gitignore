@@ -1,0 +1,12 @@
+*.log
+.nextflow/
+*.log.[0-9]
+*.out
+/output/modules
+/output/run_info
+/output/results
+*/bam/*
+*/qc/*
+*/vcf/*
+/work/
+README_files/

@@ -3,6 +3,23 @@ title: "Untitled"
 format: html
 ---
 
+# Archaeon nextflow draft
+
+## Testing
+```{bash}
+REF=/group/referencedata/mspd-db/genomes/insect/bactrocera_dorsalis/GWHFHGK00000000.1/GWHFHGK00000000.1.genome.fasta
+
+module load Miniconda3/24.7.1-0
+nextflow run . \
+    --genome "$REF" \
+    --references nachr_ref.fa \
+    --reference_metadata ref_metadata.tsv \
+    --slurm_account 'fruitfly' \
+    -resume
+
+```
+
+
 
 # Archaeon draft
 
